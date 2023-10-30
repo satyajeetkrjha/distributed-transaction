@@ -1,15 +1,23 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 )
 
 var server = flag.Bool("server", false, "Run as a server")
 var port = flag.Int("port", 80, "Port to listen on")
+
+// we use this later
+var errTransactionAlreadyStarted = errors.New("transaction already started")
+var errMustBeInTransaction = errors.New("must be in a transaction")
 
 type webHandler struct {
 	sync.RWMutex
@@ -21,6 +29,8 @@ type webHandler struct {
 	inTransaction bool
 	newData       map[string]string
 }
+
+//Server Part
 
 func (h *webHandler) Index(w http.ResponseWriter, req *http.Request) {
 	w.Write([]byte("Hello world"))
@@ -122,5 +132,100 @@ func main() {
 		http.Handle("/list", http.HandlerFunc(h.List))
 		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 	}
+	addr1 := "http://localhost"
+	addr2 := "http://localhost:8080"
 
+	if err := begin(addr1); err != nil {
+		log.Fatal("Calling begin on server1 failed: %v", err)
+	}
+
+	if err := begin(addr2); err != nil {
+		log.Fatal("Calling begin on server2 failed: %v", err)
+	}
+}
+
+// Client part starts
+// *********************************************************************************************************
+func begin(addr string) error {
+	log.Printf("Begin %q", addr)
+
+	resp, err := http.Get(addr + "/begin")
+	if err != nil {
+		return fmt.Errorf("making http query: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := ioutil.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusConflict {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(string(respBody)), errTransactionAlreadyStarted)
+	} else if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+
+	return fmt.Errorf("unexpected response: status code %d, contents: %v", resp.StatusCode, string(respBody))
+}
+func commit(addr string) error {
+	log.Printf("Commit %q", addr)
+
+	resp, err := http.Get(addr + "/commit")
+	if err != nil {
+		return fmt.Errorf("making http query: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := ioutil.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusBadRequest {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(string(respBody)), errMustBeInTransaction)
+	} else if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+
+	return fmt.Errorf("unexpected response: status code %d, contents: %v", resp.StatusCode, string(respBody))
+}
+
+func rollback(addr string) error {
+	log.Printf("Rollback %q", addr)
+
+	resp, err := http.Get(addr + "/rollback")
+	if err != nil {
+		return fmt.Errorf("making http query: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := ioutil.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusBadRequest {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(string(respBody)), errMustBeInTransaction)
+	} else if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+
+	return fmt.Errorf("unexpected response: status code %d, contents: %v", resp.StatusCode, string(respBody))
+}
+
+func set(addr string, key string, value string) error {
+	log.Printf("Set %q = %q on host %q", key, value, addr)
+
+	u := url.Values{
+		"key":   []string{key},
+		"value": []string{value},
+	}
+
+	resp, err := http.Get(addr + "/set?" + u.Encode())
+	if err != nil {
+		return fmt.Errorf("making http query: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := ioutil.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusNotAcceptable {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(string(respBody)), errMustBeInTransaction)
+	} else if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+
+	return fmt.Errorf("unexpected response: status code %d, contents: %v", resp.StatusCode, string(respBody))
 }
